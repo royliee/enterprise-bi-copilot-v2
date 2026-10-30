@@ -110,10 +110,15 @@ def parse_synthesis_response(response: str) -> tuple[str, str]:
     detailed_marker = "Detailed Findings"
     detailed_index = response.lower().find(detailed_marker.lower())
     if detailed_index < 0:
-        return response.strip().replace("**", ""), ""
+        return response.strip(), ""
     executive = response[:detailed_index].strip()
-    executive = executive.removeprefix("**Executive Summary**:").strip()
-    executive = re.sub(r"(?m)^\s*\*\*\s*$", "", executive).strip().replace("**", "")
+    executive = re.sub(
+        r"^\*\*Executive Summary\*\*:\s*",
+        "",
+        executive,
+        flags=re.IGNORECASE,
+    ).strip()
+    executive = re.sub(r"(?m)^\s*\*\*\s*$", "", executive).strip()
     detailed = response[detailed_index + len(detailed_marker):].strip()
     detailed = detailed.removeprefix("**:").strip()
     return executive, detailed
@@ -216,9 +221,17 @@ def follow_up_chat_node(state: AgentState) -> Dict[str, Any]:
     report = "\n\n".join(
         part for part in (state.executive_summary, state.detailed_findings) if part
     ) or state.final_response or "No audit report is available."
-    prompt = f"""You are answering a follow-up question about an existing Enterprise BI audit.
-Use only the current audit report, its database findings, and its retrieved policy context below.
-Do not run SQL, invent new calculations, or introduce policies, thresholds, or facts that are not present in this context.
+    prompt = f"""You are an elite executive BI analyst and compliance auditor answering a follow-up question about an existing Enterprise BI audit.
+Use only the current audit report, its database findings, and its retrieved policy context below. Do not run SQL, invent calculations, or introduce policies, thresholds, citations, or facts that are not explicitly present in this context.
+
+RESPONSE STYLE:
+- Answer the user's primary question directly in the very first sentence. Do not begin with conversational filler such as "Sure, I can help with that", "Based on the provided data", or "Here is the summary".
+- Be authoritative, concise, and high in relevant information. Use Markdown bullets for supporting details and bold key metrics, categories, entities, and verdicts.
+- For structured-data questions, state the answer or primary metric immediately. Format supporting breakdowns as concise bullets with bold labels; format currency and percentages for readability only when the exact underlying value or unit is available. Do not calculate, convert, or infer values.
+- For structured-data questions, end with exactly one short analytical takeaway sentence, prefixed with "*Takeaway:*".
+- For policy questions, state the definitive rule or verdict in the first sentence. Itemize relevant clauses, timelines, thresholds, and exceptions as bullets, and cite the exact document section or rule name in square brackets when it appears in the supplied context.
+- Never output raw JSON, database dumps, or unstyled source excerpts in the conversational answer unless the user explicitly requests them. Summarize only the relevant facts.
+- If the context does not contain enough evidence, state that limitation directly; do not guess.
 
 CURRENT AUDIT REPORT:
 {report}
@@ -268,25 +281,36 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
     llm = get_llm()
     
     sql_text = json.dumps(state.sql_results, indent=2) if state.sql_results else "No SQL data"
-    rag_text = "\n---\n".join([r["text"] for r in state.rag_results.get("results", [])]) if state.rag_results else "No documents found"
+    rag_text = "\n---\n".join(
+        "Metadata: "
+        + json.dumps(result.get("metadata", {}), ensure_ascii=False, default=str)
+        + "\n"
+        + result["text"]
+        for result in (state.rag_results or {}).get("results", [])
+    ) or "No documents found"
     
-    prompt = f"""You are an Enterprise Business Intelligence analyst. Your job is to synthesize database results and corporate policy.
+    prompt = f"""You are an elite executive BI analyst and compliance auditor. Synthesize the database results and corporate policy into a direct, accurate answer to the user's question.
 
-Provide a clear answer first. If the answer is quantitative, follow it with a compact Markdown table containing only the exact values from the database results. End with a short, human-readable derivation note.
-Thoroughly review every retrieved context chunk, including adjacent clauses, subsections, conditions, exceptions, and membership or option language, before stating that a policy rule or provision is missing. When a policy applies, provide the complete rule supported by the retrieved text rather than an isolated sentence.
+RESPONSE FORMAT:
+1. The very first sentence must directly answer the user's primary question. Never begin with conversational filler such as "Sure, I can help with that", "Based on the provided data", or "Here is the summary".
+2. For structured-data / SQL questions:
+   - State the primary answer or metric immediately.
+   - Present supporting numbers and breakdowns as clean Markdown bullets with bold category or entity labels, for example: "**Food and beverages**: Total revenue = **$56,144.84** | Gross income = **$2,673.56**".
+   - Format currency and percentages consistently (for example, **$106,200.37**, **7.03 / 10**, **4.76%**) when the result provides the value and its unit. Formatting may not change, convert, or add to the underlying values.
+   - Conclude with exactly one concise analytical sentence prefixed with "*Takeaway:*". Only state comparisons or conclusions directly supported by the query results; do not calculate them yourself.
+3. For policy / RAG questions:
+   - State the definitive verdict or rule in the first sentence, with the key verdict bolded (for example, "**No.** Staff members are prohibited from …").
+   - Itemize relevant clauses, timelines, thresholds, and exceptions as concise bullets.
+   - Cite the exact document section or rule name using square brackets (for example, "[Section 5: Vendor Eligibility]") when that title or rule name is present in the retrieved text or metadata. Do not invent a section, rule name, document title, or page.
+4. For questions requiring both data and policy, answer directly first, then use clearly labeled **Data** and **Policy** bullets as relevant; finish with one *Takeaway* sentence only when structured-data findings are part of the answer.
+5. Use authoritative, concise, high-density Markdown. Bold important metrics, categories, entity names, and key verdicts.
+6. Never show raw JSON, raw result dumps, or unstyled document excerpts in the answer unless the user explicitly asks for them. Do not include an **Evidence**, **Interpretation**, **Recommended Next Steps**, or **Action Items** section.
 
-CRITICAL CONSTRAINTS:
-- ZERO MATH RULE: You are strictly forbidden from performing any mathematical calculations (e.g., calculating percentage differences, sums, or absolute differences). You must ONLY report the exact numbers provided to you in the database query results.
-- CRITICAL RAG RULE: You are strictly forbidden from inventing numbers, tiers, or policies. Do not mention specific dollar amounts or tiers unless they are explicitly written in the provided RAG context text. Stick only to the provided facts.
-- Do not guess the type of organization (e.g., do not say 'the university' or 'the hospital' unless explicitly named in the text). Refer to the source document exactly as it is titled or simply as 'the corporate policy'.
-- STRICT GROUNDING RULE: You must ONLY reference policies, rules, or thresholds that are explicitly provided in the retrieved document context. NEVER invent, assume, or hallucinate external business rules, tier limits, or monetary thresholds. If the policy context does not mention a specific number, do not write one.
-- DO NOT generate an 'Evidence' section.
-- DO NOT generate an 'Interpretation' section.
-- DO NOT generate 'Recommended Next Steps', 'Action Items', or any business advice.
-- Derivation note: explain the calculation in 1-2 plain sentences, such as "Derived by summing the 'Total' column for records where 'Product line' is 'Electronic accessories' and 'Payment' method is 'Ewallet'."
-- If a policy document is relevant, add exactly one clean citation line in this format: "Policy Reference: [document title], [section title or clause], Page [number]." Use a section or page only when explicitly present in the retrieved context; otherwise omit the citation line.
-- Build citations only from the retrieved Metadata fields: document_title, section_title, and page. Never infer a document title, section, or page number.
-- DO NOT output raw bm25 labels, full document text excerpts, or raw SQL syntax blocks unless the user explicitly requests them.
+GROUNDING AND ANALYSIS:
+- Report only values explicitly present in the database query results. ZERO MATH: do not calculate sums, averages, percentages, differences, rankings, or other values yourself. Do not infer units or format a value as currency or a percentage unless the source supports that unit.
+- Never invent a number, tier, threshold, policy, exception, citation, or organization type. Use only facts explicitly present in the database results, retrieved policy context, and the user's question.
+- Review all retrieved context chunks, including adjacent clauses, subsections, conditions, exceptions, and membership or option language, before stating that a policy rule or provision is missing. When a policy applies, state the complete rule supported by the retrieved text rather than an isolated sentence.
+- If there is insufficient evidence, identify the specific limitation plainly rather than guessing.
 
 User Question:
 {state.user_query}
@@ -300,9 +324,6 @@ Database Query Results:
 
     response = llm.invoke(prompt)
     executive_summary, detailed_findings = parse_synthesis_response(response.content)
-    original_summary = executive_summary
-    cleaned_summary = re.sub(r'\*+', '', original_summary).strip()
-    executive_summary = cleaned_summary
     final_response = "\n\n".join(
         part for part in (executive_summary, detailed_findings) if part
     )
