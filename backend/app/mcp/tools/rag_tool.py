@@ -1,5 +1,8 @@
+import logging
 import os
 import re
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -12,6 +15,7 @@ DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "user_123")
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 180
 RRF_K = 60
+logger = logging.getLogger(__name__)
 
 
 def _section_title(text: str, fallback: str) -> str:
@@ -47,11 +51,31 @@ class HybridRetriever:
     def __init__(self):
         self.dense_enabled = os.getenv("ENABLE_DENSE_RAG", "true").lower() == "true"
         self.collection = None
+        self.chroma_client = None
+        self._index_lock = threading.RLock()
         if self.dense_enabled:
             import chromadb
 
-            self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            self.collection = self.chroma_client.get_or_create_collection(name="enterprise_policies")
+            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+                self.collection = self.chroma_client.get_or_create_collection(
+                    name="enterprise_policies"
+                )
+            except BlockingIOError as error:
+                self.dense_enabled = False
+                logger.warning(
+                    "Chroma persistent index is locked; continuing with BM25 retrieval: %s",
+                    error,
+                )
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower():
+                    raise
+                self.dense_enabled = False
+                logger.warning(
+                    "Chroma persistent index is locked; continuing with BM25 retrieval: %s",
+                    error,
+                )
         self.documents: List[str] = []
         self.doc_ids: List[str] = []
         self.document_tenants: List[str] = []
@@ -75,20 +99,31 @@ class HybridRetriever:
         self._append_chunks(chunks, DEFAULT_TENANT_ID, "sample")
 
     def _append_chunks(self, chunks: Sequence[Dict[str, Any]], tenant_id: str, source: str) -> int:
-        start = len(self.documents)
-        ids = [f"{tenant_id}_{source}_{start + index}" for index in range(len(chunks))]
-        self.documents.extend(chunk["text"] for chunk in chunks)
-        self.doc_ids.extend(ids)
-        self.document_tenants.extend([tenant_id] * len(chunks))
-        self.document_metadata.extend(chunk["metadata"] for chunk in chunks)
-        self.bm25 = BM25Okapi([re.findall(r"\w+", document.lower()) for document in self.documents])
-        if self.dense_enabled and self.collection is not None:
-            self.collection.upsert(
-                documents=[chunk["text"] for chunk in chunks],
-                ids=ids,
-                metadatas=[chunk["metadata"] for chunk in chunks],
-            )
-        return len(chunks)
+        with self._index_lock:
+            start = len(self.documents)
+            ids = [f"{tenant_id}_{source}_{start + index}" for index in range(len(chunks))]
+            documents = [*self.documents, *(chunk["text"] for chunk in chunks)]
+            doc_ids = [*self.doc_ids, *ids]
+            document_tenants = [*self.document_tenants, *([tenant_id] * len(chunks))]
+            document_metadata = [
+                *self.document_metadata,
+                *(chunk["metadata"] for chunk in chunks),
+            ]
+            bm25 = BM25Okapi(
+                [re.findall(r"\w+", document.lower()) for document in documents]
+            ) if documents else None
+            if self.dense_enabled and self.collection is not None and chunks:
+                self.collection.upsert(
+                    documents=[chunk["text"] for chunk in chunks],
+                    ids=ids,
+                    metadatas=[chunk["metadata"] for chunk in chunks],
+                )
+            self.documents = documents
+            self.doc_ids = doc_ids
+            self.document_tenants = document_tenants
+            self.document_metadata = document_metadata
+            self.bm25 = bm25
+            return len(chunks)
 
     def add_document_pages(self, pages: Sequence[str], tenant_id: str, source: str) -> int:
         chunks: List[Dict[str, Any]] = []
@@ -147,7 +182,19 @@ class HybridRetriever:
                     doc_id = next((i for i, item in enumerate(self.document_metadata) if item == metadata), None)
                     if doc_id is not None:
                         dense_ranked.append(doc_id)
-            except Exception:
+            except BlockingIOError as error:
+                logger.warning(
+                    "Chroma query was blocked; returning sparse retrieval results: %s",
+                    error,
+                )
+                dense_ranked = []
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower():
+                    raise
+                logger.warning(
+                    "Chroma query encountered a locked index; returning sparse retrieval results: %s",
+                    error,
+                )
                 dense_ranked = []
         fused: Dict[int, float] = {}
         for rank, index in enumerate(sparse_ranked):

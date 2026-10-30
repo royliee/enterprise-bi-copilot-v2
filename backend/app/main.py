@@ -1,7 +1,9 @@
 ﻿import json
 import asyncio
+import logging
 import os
 import re
+import sqlite3
 from collections.abc import Hashable
 from io import BytesIO
 from pathlib import Path
@@ -11,13 +13,16 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine, make_url
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from pypdf import PdfReader
 
 from backend.app.agent.graph import bi_agent
 from backend.app.agent.state import AgentState
+from backend.app.mcp.tools.sql_tool import DATABASE_URL, DB_PATH
 from backend.app.mcp.tools.rag_tool import retriever
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Enterprise BI Copilot API", version="1.0.0")
 
 app.add_middleware(
@@ -236,46 +241,87 @@ async def chat_endpoint(payload: QueryRequest, x_tenant_id: str | None = Header(
 
 @app.post("/api/upload/csv")
 async def upload_csv(file: UploadFile = File(...), x_tenant_id: str | None = Header(default=None)):
-    tenant_id = require_tenant_id(x_tenant_id)
-    supported_extensions = {".csv", ".tsv", ".xlsx", ".xls"}
-    if not file.filename or Path(file.filename).suffix.lower() not in supported_extensions:
-        raise HTTPException(status_code=400, detail="Only CSV, TSV, XLSX, and XLS files are supported")
-
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url or not database_url.startswith("postgresql"):
-        raise HTTPException(status_code=503, detail="PostgreSQL DATABASE_URL is not configured")
-
     engine = None
     try:
+        tenant_id = require_tenant_id(x_tenant_id)
+        supported_extensions = {".csv", ".tsv", ".xlsx", ".xls"}
+        if not file.filename or Path(file.filename).suffix.lower() not in supported_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail="Only CSV, TSV, XLSX, and XLS files are supported",
+            )
         dataframe = _read_tabular_file(file.filename, await file.read())
         dataframe["tenant_id"] = tenant_id
-        engine_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
-        engine = create_engine(engine_url)
+        database_url = make_url(DATABASE_URL) if DATABASE_URL else URL.create(
+            "sqlite", database=str(DB_PATH)
+        )
+        if database_url.drivername == "postgresql":
+            database_url = database_url.set(drivername="postgresql+psycopg")
+        is_sqlite = database_url.get_backend_name() == "sqlite"
+        connect_args = {"timeout": 30} if is_sqlite else {}
+        if is_sqlite and database_url.database not in (None, ":memory:"):
+            Path(database_url.database).expanduser().parent.mkdir(
+                parents=True, exist_ok=True
+            )
+        engine = create_engine(database_url, connect_args=connect_args)
         table_name = os.getenv("CSV_TABLE_NAME", "business_data")
         dataframe.to_sql(table_name, engine, if_exists="replace", index=False)
+    except HTTPException:
+        raise
+    except (sqlite3.OperationalError, SQLAlchemyOperationalError, BlockingIOError) as error:
+        if isinstance(error, BlockingIOError) or "locked" in str(error).lower():
+            logger.warning("Tabular upload is waiting on a locked database: %s", error)
+            raise HTTPException(
+                status_code=503,
+                detail="The database is temporarily locked; please retry the upload.",
+            ) from error
+        logger.exception("Tabular upload failed")
+        raise HTTPException(status_code=500, detail=f"CSV upload failed: {error}") from error
     except Exception as error:
+        logger.exception("Tabular upload failed")
         raise HTTPException(status_code=500, detail=f"CSV upload failed: {error}") from error
     finally:
         if engine is not None:
             engine.dispose()
+        await file.close()
 
     return {"filename": file.filename, "tenant_id": tenant_id, "row_count": len(dataframe)}
 
 
 @app.post("/api/upload/pdf")
 async def upload_pdf(file: UploadFile = File(...), x_tenant_id: str | None = Header(default=None)):
-    tenant_id = require_tenant_id(x_tenant_id)
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
     try:
-        reader = PdfReader(BytesIO(await file.read()))
+        tenant_id = require_tenant_id(x_tenant_id)
+        if not file.filename or Path(file.filename).suffix.lower() != ".pdf":
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="The uploaded PDF is empty")
+        reader = PdfReader(BytesIO(content))
         pages = [page.extract_text() or "" for page in reader.pages]
         chunk_count = retriever.add_document_pages(pages, tenant_id, Path(file.filename).stem)
+    except HTTPException:
+        raise
+    except (sqlite3.OperationalError, SQLAlchemyOperationalError, BlockingIOError) as error:
+        if not isinstance(error, BlockingIOError) and "locked" not in str(error).lower():
+            logger.exception("PDF upload failed")
+            raise HTTPException(status_code=500, detail=f"PDF upload failed: {error}") from error
+        logger.warning("PDF upload could not write to the persistent document index: %s", error)
+        raise HTTPException(
+            status_code=503,
+            detail="The document index is temporarily locked; please retry the upload.",
+        ) from error
     except Exception as error:
+        logger.exception("PDF upload failed")
         raise HTTPException(status_code=500, detail=f"PDF upload failed: {error}") from error
+    finally:
+        await file.close()
 
-    return {"filename": file.filename, "tenant_id": tenant_id, "chunk_count": chunk_count}
+    return {
+        "status": "success",
+        "filename": file.filename,
+        "chunk_count": chunk_count,
+    }
 
 if __name__ == "__main__":
     import uvicorn

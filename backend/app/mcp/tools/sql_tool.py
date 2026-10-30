@@ -1,5 +1,6 @@
 ﻿import os
 import sqlite3
+from contextlib import closing
 from decimal import Decimal
 from datetime import date, datetime
 from pathlib import Path
@@ -30,16 +31,15 @@ def _sanitize_record(record: Dict[str, Any]) -> Dict[str, Any]:
 def get_database_schema() -> str:
     """Returns database schemas from Supabase Postgres or local SQLite."""
     if DATABASE_URL and DATABASE_URL.startswith("postgresql"):
-        conn = _connect_postgres()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT table_name, column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_schema = 'public' 
-            ORDER BY table_name, ordinal_position;
-        """)
-        rows = cursor.fetchall()
-        conn.close()
+        with closing(_connect_postgres()) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                ORDER BY table_name, ordinal_position;
+            """)
+            rows = cursor.fetchall()
         
         tables = {}
         for table, col, dtype in rows:
@@ -47,11 +47,11 @@ def get_database_schema() -> str:
         schema_str = "\n\n".join([f"CREATE TABLE {t} (\n" + ",\n".join(cols) + "\n);" for t, cols in tables.items()])
         return schema_str
     else:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table';")
-        schemas = [row[0] for row in cursor.fetchall() if row[0] is not None]
-        conn.close()
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(DB_PATH, timeout=30)) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table';")
+            schemas = [row[0] for row in cursor.fetchall() if row[0] is not None]
         return "\n\n".join(schemas)
 
 def execute_readonly_query(sql_query: str) -> Dict[str, Any]:
@@ -65,21 +65,20 @@ def execute_readonly_query(sql_query: str) -> Dict[str, Any]:
     try:
         if DATABASE_URL and DATABASE_URL.startswith("postgresql"):
             from psycopg.rows import dict_row
-            conn = _connect_postgres()
-            cursor = conn.cursor(row_factory=dict_row)
-            cursor.execute(sql_query)
-            rows = cursor.fetchall()
-            result = [_sanitize_record(row) for row in rows]
-            conn.close()
+            with closing(_connect_postgres()) as conn:
+                cursor = conn.cursor(row_factory=dict_row)
+                cursor.execute(sql_query)
+                rows = cursor.fetchall()
+                result = [_sanitize_record(row) for row in rows]
             return {"row_count": len(result), "data": result}
         else:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(sql_query)
-            rows = cursor.fetchall()
-            result = [_sanitize_record(dict(row)) for row in rows]
-            conn.close()
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(DB_PATH, timeout=30)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(sql_query)
+                rows = cursor.fetchall()
+                result = [_sanitize_record(dict(row)) for row in rows]
             return {"row_count": len(result), "data": result}
     except Exception as e:
         return {"error": f"SQL Error: {str(e)}"}
