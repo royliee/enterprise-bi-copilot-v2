@@ -93,7 +93,7 @@ export default function ChatWorkspace() {
         },
         body: JSON.stringify({
           message,
-          messages: nextMessages,
+          messages: nextMessages.map(({ role, content }) => ({ role, content })),
           audit_context: pinnedReport
             ? {
                 report: pinnedReport,

@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import create_engine
 from pypdf import PdfReader
@@ -28,9 +28,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    role: str
+    content: str
+
+
 class QueryRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     message: str
-    messages: list[dict[str, str]] = Field(default_factory=list)
+    messages: list[ChatMessage] = Field(default_factory=list)
     audit_context: dict[str, object] | None = None
 
 
@@ -145,7 +154,7 @@ async def chat_endpoint(payload: QueryRequest, x_tenant_id: str | None = Header(
     tenant_id = require_tenant_id(x_tenant_id)
 
     async def event_generator():
-        messages = list(payload.messages)
+        messages = [message.model_dump() for message in payload.messages]
         if not messages or messages[-1].get("content") != payload.message:
             messages.append({"role": "user", "content": payload.message})
         audit_context = payload.audit_context or {}
