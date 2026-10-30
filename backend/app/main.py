@@ -177,10 +177,13 @@ async def chat_endpoint(payload: QueryRequest, x_tenant_id: str | None = Header(
         await asyncio.sleep(0.05)
 
         accumulated_state = {}
+        sql_executed = False
 
         try:
             for chunk in bi_agent.stream(initial_state):
                 for node_name, node_output in chunk.items():
+                    if node_name == "sql_executor":
+                        sql_executed = True
                     accumulated_state.update(node_output)
                     step_data = {
                         "node": node_name,
@@ -194,21 +197,14 @@ async def chat_endpoint(payload: QueryRequest, x_tenant_id: str | None = Header(
                     await asyncio.sleep(0.05)
 
                     if node_name in {"synthesizer", "sql_failure"} and node_output.get("final_response"):
-                        rag_routed = bool(accumulated_state.get("rag_routed"))
-                        rag_results = accumulated_state.get("rag_results")
-                        rag_results_present = bool(
-                            (rag_results or {}).get("results")
-                        )
                         final_payload = {
                             "final_response": node_output.get("final_response"),
                             "executive_summary": accumulated_state.get("executive_summary", ""),
                             "detailed_findings": accumulated_state.get("detailed_findings", ""),
-                            "sql_query": accumulated_state.get("sql_query"),
-                            "sql_results": accumulated_state.get("sql_results"),
-                            "policy_sources_included": rag_routed or rag_results_present,
                         }
-                        if rag_routed:
-                            final_payload["rag_results"] = rag_results or {"results": []}
+                        if sql_executed:
+                            final_payload["sql_query"] = accumulated_state.get("sql_query")
+                            final_payload["sql_results"] = accumulated_state.get("sql_results")
                         yield {
                             "event": "final",
                             "data": json.dumps(final_payload)
@@ -219,23 +215,12 @@ async def chat_endpoint(payload: QueryRequest, x_tenant_id: str | None = Header(
                             if message.get("role") == "assistant"
                         ]
                         if assistant_messages:
-                            rag_routed = bool(accumulated_state.get("rag_routed"))
-                            rag_results = accumulated_state.get("rag_results")
-                            policy_sources_included = bool(
-                                rag_routed
-                                or (rag_results or {}).get("results")
-                            )
                             final_payload = {
                                 "follow_up": True,
                                 "final_response": assistant_messages[-1].get("content", ""),
                                 "executive_summary": initial_state.executive_summary,
                                 "detailed_findings": initial_state.detailed_findings,
-                                "sql_query": audit_context.get("sql_query"),
-                                "sql_results": initial_state.sql_results,
-                                "policy_sources_included": policy_sources_included,
                             }
-                            if policy_sources_included:
-                                final_payload["rag_results"] = rag_results or {"results": []}
                             yield {
                                 "event": "final",
                                 "data": json.dumps(final_payload)

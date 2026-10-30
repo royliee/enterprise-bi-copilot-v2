@@ -14,14 +14,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 export type SqlRecord = Record<string, string | number | null>;
-export type PolicyMatch = { text: string; source: string; score: number };
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
-  sqlQuery?: string;
-  records?: SqlRecord[];
-  policyMatches?: PolicyMatch[];
-  policySourcesIncluded?: boolean;
+  sql: string | null;
+  records: SqlRecord[] | null;
 };
 
 type ChatProps = {
@@ -127,7 +124,7 @@ export default function Chat({
                       <p>{message.content}</p>
                     )}
                   </div>
-                  {message.sqlQuery && (
+                  {message.sql && message.records?.length ? (
                     <details className="bi-sql-details">
                       <summary>
                         <Database size={15} aria-hidden="true" />
@@ -139,11 +136,11 @@ export default function Chat({
                         />
                       </summary>
                       <pre>
-                        <code>{message.sqlQuery}</code>
+                        <code>{message.sql}</code>
                       </pre>
                     </details>
-                  )}
-                  {!!message.records?.length && (
+                  ) : null}
+                  {message.sql && message.records?.length ? (
                     <div className="bi-result-preview">
                       <div className="bi-result-heading">
                         <strong>Data preview</strong>
@@ -186,22 +183,7 @@ export default function Chat({
                         </p>
                       )}
                     </div>
-                  )}
-                  {message.policySourcesIncluded && (
-                    <div className="bi-policy-context">
-                      <strong>Policy sources</strong>
-                      {message.policyMatches?.length ? (
-                        message.policyMatches.map((match, matchIndex) => (
-                          <p key={`${match.source}-${matchIndex}`}>
-                            <span>{match.source}</span>
-                            {match.text}
-                          </p>
-                        ))
-                      ) : (
-                        <p>No matching policy documents were retrieved.</p>
-                      )}
-                    </div>
-                  )}
+                  ) : null}
                 </div>
               </article>
             ))}
