@@ -4,6 +4,7 @@ from backend.app.agent.nodes import (
     follow_up_chat_node,
     initialize_run_node,
     planner_node,
+    rag_router_node,
     router_node,
     sql_node,
     rag_node,
@@ -23,17 +24,37 @@ def build_bi_agent_graph():
     workflow.add_node("initialize_run", initialize_run_node)
     workflow.add_node("router", router_node)
     workflow.add_node("follow_up_chat", follow_up_chat_node)
+    workflow.add_node("rag_router", rag_router_node)
 
     # Set edge flow
     workflow.set_entry_point("router")
     workflow.add_conditional_edges(
         "router",
         lambda state: state.conversation_route,
-        {"new_audit": "initialize_run", "follow_up": "follow_up_chat"},
+        {"new_audit": "initialize_run", "follow_up": "rag_router"},
     )
     workflow.add_edge("initialize_run", "planner")
-    workflow.add_edge("planner", "rag_executor")
-    workflow.add_edge("rag_executor", "sql_executor")
+    workflow.add_edge("planner", "rag_router")
+    workflow.add_conditional_edges(
+        "rag_router",
+        lambda state: (
+            "rag" if state.rag_routed else
+            "follow_up" if state.conversation_route == "follow_up" else
+            "sql_only"
+        ),
+        {
+            "rag": "rag_executor",
+            "follow_up": "follow_up_chat",
+            "sql_only": "sql_executor",
+        },
+    )
+    workflow.add_conditional_edges(
+        "rag_executor",
+        lambda state: (
+            "follow_up" if state.conversation_route == "follow_up" else "new_audit"
+        ),
+        {"follow_up": "follow_up_chat", "new_audit": "sql_executor"},
+    )
     workflow.add_conditional_edges(
         "sql_executor",
         lambda state: (

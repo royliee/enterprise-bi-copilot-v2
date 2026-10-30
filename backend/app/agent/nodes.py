@@ -66,6 +66,7 @@ def initialize_run_node(state: AgentState) -> Dict[str, Any]:
         "retry_count": 0,
         "logical_retry_count": 0,
         "plan": [],
+        "rag_routed": False,
         "sql_query": None,
         "sql_results": None,
         "rag_query": None,
@@ -141,6 +142,32 @@ USER QUESTION:
         "plan": plan,
         "current_step": "planning_complete",
         "execution_trace": trace
+    }
+
+def rag_router_node(state: AgentState) -> Dict[str, Any]:
+    trace = list(state.execution_trace)
+    llm = get_llm()
+    prompt = f"""Decide whether answering the user's question requires searching uploaded policy, contract, or other reference documents.
+Return exactly RAG_REQUIRED if the question asks about a policy, contract, rule, compliance requirement, definition, or document-based exception, including questions that combine those topics with data.
+Return exactly SQL_ONLY if it can be answered solely from structured business data such as metrics, totals, rankings, trends, or tabular comparisons.
+Do not answer the question. Return only one of the two exact labels.
+
+USER QUESTION:
+{state.user_query}"""
+    route = llm.invoke(prompt).content.strip().upper()
+    if route not in {"RAG_REQUIRED", "SQL_ONLY"}:
+        raise ValueError(f"Unexpected policy routing response: {route!r}")
+
+    rag_routed = route == "RAG_REQUIRED"
+    trace.append({
+        "step": "policy_routing",
+        "route": "rag" if rag_routed else "sql_only",
+    })
+    return {
+        "rag_routed": rag_routed,
+        "rag_results": state.rag_results if rag_routed else None,
+        "current_step": "policy_routing_complete",
+        "execution_trace": trace,
     }
 
 def sql_node(state: AgentState) -> Dict[str, Any]:
@@ -227,7 +254,10 @@ Use only the current audit report, its database findings, and its retrieved poli
 RESPONSE STYLE:
 - Answer the user's primary question directly in the very first sentence. Do not begin with conversational filler such as "Sure, I can help with that", "Based on the provided data", or "Here is the summary".
 - Be authoritative, concise, and high in relevant information. Use Markdown bullets for supporting details and bold key metrics, categories, entities, and verdicts.
-- For structured-data questions, state the answer or primary metric immediately. Format supporting breakdowns as concise bullets with bold labels; format currency and percentages for readability only when the exact underlying value or unit is available. Do not calculate, convert, or infer values.
+- For structured-data questions, state the answer or primary metric immediately. Format supporting breakdowns as concise bullets with bold labels.
+- Never display raw floating-point values for currency or counts. Format monetary values to exactly 2 decimal places with thousands separators and the currency symbol supported by the question or source (for example, **$110,568.71**). If the currency is not identified, use 2 decimal places and thousands separators without inventing a symbol.
+- Format whole-number counts and volumes as integers with thousands separators (for example, **1,250** or **328**). Preserve meaningful precision for non-currency, non-count measurements.
+- Rounding a reported monetary value to 2 decimal places is permitted for display only. Do not calculate, convert, or infer metrics, currencies, or units.
 - For structured-data questions, end with exactly one short analytical takeaway sentence, prefixed with "*Takeaway:*".
 - For policy questions, state the definitive rule or verdict in the first sentence. Itemize relevant clauses, timelines, thresholds, and exceptions as bullets, and cite the exact document section or rule name in square brackets when it appears in the supplied context.
 - Never output raw JSON, database dumps, or unstyled source excerpts in the conversational answer unless the user explicitly requests them. Summarize only the relevant facts.
@@ -289,14 +319,17 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
         for result in (state.rag_results or {}).get("results", [])
     ) or "No documents found"
     
-    prompt = f"""You are an elite executive BI analyst and compliance auditor. Synthesize the database results and corporate policy into a direct, accurate answer to the user's question.
+    prompt = f"""You are an elite executive BI analyst and compliance auditor. Synthesize the database results and, when retrieved, relevant corporate policy into a direct, accurate answer to the user's question.
 
 RESPONSE FORMAT:
 1. The very first sentence must directly answer the user's primary question. Never begin with conversational filler such as "Sure, I can help with that", "Based on the provided data", or "Here is the summary".
 2. For structured-data / SQL questions:
    - State the primary answer or metric immediately.
    - Present supporting numbers and breakdowns as clean Markdown bullets with bold category or entity labels, for example: "**Food and beverages**: Total revenue = **$56,144.84** | Gross income = **$2,673.56**".
-   - Format currency and percentages consistently (for example, **$106,200.37**, **7.03 / 10**, **4.76%**) when the result provides the value and its unit. Formatting may not change, convert, or add to the underlying values.
+   - Never display raw floating-point values for currency or counts. Format monetary values to exactly 2 decimal places with thousands separators and the currency symbol supported by the question or source (for example, **$110,568.71** or **$5,265.18**). If the currency is not identified, use 2 decimal places and thousands separators without inventing a symbol.
+   - Format whole-number counts and volumes as integers with thousands separators (for example, **1,250** or **328**). Preserve meaningful precision for non-currency, non-count measurements.
+   - Rounding a reported monetary value to 2 decimal places is permitted for display only. Do not calculate, convert, or infer metrics, currencies, or units.
+   - Format percentages consistently (for example, **4.76%**) when the result provides the value and its unit.
    - Conclude with exactly one concise analytical sentence prefixed with "*Takeaway:*". Only state comparisons or conclusions directly supported by the query results; do not calculate them yourself.
 3. For policy / RAG questions:
    - State the definitive verdict or rule in the first sentence, with the key verdict bolded (for example, "**No.** Staff members are prohibited from …").
@@ -307,7 +340,7 @@ RESPONSE FORMAT:
 6. Never show raw JSON, raw result dumps, or unstyled document excerpts in the answer unless the user explicitly asks for them. Do not include an **Evidence**, **Interpretation**, **Recommended Next Steps**, or **Action Items** section.
 
 GROUNDING AND ANALYSIS:
-- Report only values explicitly present in the database query results. ZERO MATH: do not calculate sums, averages, percentages, differences, rankings, or other values yourself. Do not infer units or format a value as currency or a percentage unless the source supports that unit.
+- Report only values explicitly present in the database query results. ZERO MATH: do not calculate sums, averages, percentages, differences, rankings, or other metrics yourself. Display-only currency rounding and count separators are permitted as specified above. Do not infer units or format a value as currency or a percentage unless the source supports that unit.
 - Never invent a number, tier, threshold, policy, exception, citation, or organization type. Use only facts explicitly present in the database results, retrieved policy context, and the user's question.
 - Review all retrieved context chunks, including adjacent clauses, subsections, conditions, exceptions, and membership or option language, before stating that a policy rule or provision is missing. When a policy applies, state the complete rule supported by the retrieved text rather than an isolated sentence.
 - If there is insufficient evidence, identify the specific limitation plainly rather than guessing.

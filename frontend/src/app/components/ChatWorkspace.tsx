@@ -24,6 +24,7 @@ type AuditPayload = {
   sql_query?: string;
   sql_results?: { data?: SqlRecord[] };
   rag_results?: { results?: PolicyMatch[] };
+  policy_sources_included?: boolean;
 };
 type UploadPayload = {
   detail?: string;
@@ -43,6 +44,7 @@ export default function ChatWorkspace() {
   const [pinnedReport, setPinnedReport] = useState("");
   const [records, setRecords] = useState<SqlRecord[]>([]);
   const [ragResults, setRagResults] = useState<PolicyMatch[]>([]);
+  const [policySourcesIncluded, setPolicySourcesIncluded] = useState(false);
   const [sqlQuery, setSqlQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -98,6 +100,7 @@ export default function ChatWorkspace() {
                 sql_query: sqlQuery,
                 sql_results: records.length ? { data: records } : null,
                 rag_results: ragResults.length ? { results: ragResults } : null,
+                policy_sources_included: policySourcesIncluded,
               }
             : null,
         }),
@@ -146,13 +149,19 @@ export default function ChatWorkspace() {
           content: responsePayload.final_response,
           sqlQuery: responsePayload.sql_query || undefined,
           records: responsePayload.sql_results?.data || undefined,
-          policyMatches: responsePayload.rag_results?.results || undefined,
+          policyMatches: responsePayload.policy_sources_included
+            ? responsePayload.rag_results?.results || []
+            : undefined,
+          policySourcesIncluded: responsePayload.policy_sources_included,
         },
       ]);
+      setRagResults(responsePayload.rag_results?.results || []);
+      setPolicySourcesIncluded(
+        Boolean(responsePayload.policy_sources_included),
+      );
       if (!responsePayload.follow_up) {
         setPinnedReport(responsePayload.final_response);
         setRecords(responsePayload.sql_results?.data || []);
-        setRagResults(responsePayload.rag_results?.results || []);
         setSqlQuery(responsePayload.sql_query || "");
       }
     } catch (requestError) {
@@ -236,6 +245,7 @@ export default function ChatWorkspace() {
     setPinnedReport("");
     setRecords([]);
     setRagResults([]);
+    setPolicySourcesIncluded(false);
     setSqlQuery("");
     setError("");
     setUploadStatus("");

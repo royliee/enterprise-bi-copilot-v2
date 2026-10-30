@@ -21,6 +21,7 @@ export type ChatMessage = {
   sqlQuery?: string;
   records?: SqlRecord[];
   policyMatches?: PolicyMatch[];
+  policySourcesIncluded?: boolean;
 };
 
 type ChatProps = {
@@ -186,15 +187,19 @@ export default function Chat({
                       )}
                     </div>
                   )}
-                  {!!message.policyMatches?.length && (
+                  {message.policySourcesIncluded && (
                     <div className="bi-policy-context">
                       <strong>Policy sources</strong>
-                      {message.policyMatches.map((match, matchIndex) => (
-                        <p key={`${match.source}-${matchIndex}`}>
-                          <span>{match.source}</span>
-                          {match.text}
-                        </p>
-                      ))}
+                      {message.policyMatches?.length ? (
+                        message.policyMatches.map((match, matchIndex) => (
+                          <p key={`${match.source}-${matchIndex}`}>
+                            <span>{match.source}</span>
+                            {match.text}
+                          </p>
+                        ))
+                      ) : (
+                        <p>No matching policy documents were retrieved.</p>
+                      )}
                     </div>
                   )}
                 </div>

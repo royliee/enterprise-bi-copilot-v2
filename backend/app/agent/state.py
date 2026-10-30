@@ -10,6 +10,7 @@ class AgentState(BaseModel):
     retry_count: int = 0
     logical_retry_count: int = 0
     plan: List[str] = Field(default_factory=list)
+    rag_routed: bool = False
     sql_query: Optional[str] = None
     sql_results: Optional[Dict[str, Any]] = None
     rag_query: Optional[str] = None
