@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Northstar | Enterprise BI Copilot",
+  title: "Enterprise BI Assistant",
   description:
-    "Live compliance intelligence for enterprise commercial operations.",
+    "Ask questions across your business data and corporate policies.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
