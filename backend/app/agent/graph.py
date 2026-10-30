@@ -51,9 +51,15 @@ def build_bi_agent_graph():
     workflow.add_conditional_edges(
         "rag_executor",
         lambda state: (
-            "follow_up" if state.conversation_route == "follow_up" else "new_audit"
+            "follow_up" if state.conversation_route == "follow_up" else
+            "sql" if state.sql_routed else
+            "synthesis"
         ),
-        {"follow_up": "follow_up_chat", "new_audit": "sql_executor"},
+        {
+            "follow_up": "follow_up_chat",
+            "sql": "sql_executor",
+            "synthesis": "synthesizer",
+        },
     )
     workflow.add_conditional_edges(
         "sql_executor",

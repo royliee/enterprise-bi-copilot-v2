@@ -67,6 +67,7 @@ def initialize_run_node(state: AgentState) -> Dict[str, Any]:
         "logical_retry_count": 0,
         "plan": [],
         "rag_routed": False,
+        "sql_routed": False,
         "sql_query": None,
         "sql_results": None,
         "rag_query": None,
@@ -146,25 +147,49 @@ USER QUESTION:
 
 def rag_router_node(state: AgentState) -> Dict[str, Any]:
     trace = list(state.execution_trace)
-    llm = get_llm()
-    prompt = f"""Decide whether answering the user's question requires searching uploaded policy, contract, or other reference documents.
-Return exactly RAG_REQUIRED if the question asks about a policy, contract, rule, compliance requirement, definition, or document-based exception, including questions that combine those topics with data.
-Return exactly SQL_ONLY if it can be answered solely from structured business data such as metrics, totals, rankings, trends, or tabular comparisons.
-Do not answer the question. Return only one of the two exact labels.
+    question = state.user_query.lower()
+    policy_request = bool(re.search(
+        r"\b(?:polic(?:y|ies)|contract(?:s|ual)?|compliance|regulation|"
+        r"terms?\s+and\s+conditions|payment\s+terms?|invoice\s+payment\s+terms?|"
+        r"prompt[- ]payment(?:\s+discounts?)?|early[- ]payment\s+discounts?|"
+        r"clause(?:s)?|eligibility|reimbursement|permitted|prohibited)\b",
+        question,
+    ))
+    structured_request = bool(re.search(
+        r"\b(?:calculate|sum|total|average|mean|count|how\s+many|how\s+much|"
+        r"revenue|sales|profit|ranking|rank|top\s+\d+|trend|forecast|"
+        r"dataset|database|table|records?|rows?|columns?|breakdown|"
+        r"compare\s+(?:sales|revenue|profit|metrics?|quarters?|months?))\b",
+        question,
+    ))
+
+    if policy_request:
+        route = "HYBRID" if structured_request else "RAG_ONLY"
+    elif structured_request:
+        route = "SQL_ONLY"
+    else:
+        llm = get_llm()
+        prompt = f"""Choose the sources needed to answer the user's question.
+Return exactly RAG_ONLY for policy, contract, compliance, or document questions.
+Return exactly SQL_ONLY for structured-data questions requiring metrics, totals, rankings, trends, or comparisons.
+Return exactly HYBRID only when both document evidence and structured-data results are needed.
+Do not answer the user.
 
 USER QUESTION:
 {state.user_query}"""
-    route = llm.invoke(prompt).content.strip().upper()
-    if route not in {"RAG_REQUIRED", "SQL_ONLY"}:
-        raise ValueError(f"Unexpected policy routing response: {route!r}")
+        route = llm.invoke(prompt).content.strip().upper()
+        if route not in {"RAG_ONLY", "SQL_ONLY", "HYBRID"}:
+            raise ValueError(f"Unexpected data-source routing response: {route!r}")
 
-    rag_routed = route == "RAG_REQUIRED"
+    rag_routed = route in {"RAG_ONLY", "HYBRID"}
+    sql_routed = route in {"SQL_ONLY", "HYBRID"}
     trace.append({
-        "step": "policy_routing",
-        "route": "rag" if rag_routed else "sql_only",
+        "step": "source_routing",
+        "route": route.lower(),
     })
     return {
         "rag_routed": rag_routed,
+        "sql_routed": sql_routed,
         "rag_results": state.rag_results if rag_routed else None,
         "current_step": "policy_routing_complete",
         "execution_trace": trace,
